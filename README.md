@@ -31,7 +31,8 @@ The estimators are proven to be statistically significant, however, Global Moran
 
 
 ## Visualization
-Figure 1. Birth rate in Poland per 1,000.
+Figure 1. Birth rate in Poland per 1,000
+
 <img src="src/birthrate.png" alt="birth rate" width="500"/>
 
 Figure 2. Strong positive spatial autocorrelation observed. Poviats are located mainly in the first and third quadrant, meaning that both the birth rate in the given poviat and the average birth rate in the nerghbouring poviats are either higher (in the 1st quadrant) or lower (in the third quadrant) than the overall average
@@ -39,6 +40,7 @@ Figure 2. Strong positive spatial autocorrelation observed. Poviats are located 
 <img src="src/moran_scatterplot.png" alt="Moran’s scatter plot" width="500"/>
 
 Figure 3. Local hot spots identified by the Local Moran Statistics 
+
 <img src="src/local_moran.png" alt="local moran" width="500"/>
 
 
