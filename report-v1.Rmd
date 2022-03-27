@@ -1,0 +1,829 @@
+---
+title: "Determinants of Fertility in Poland"
+author: "Zimin Luo"
+
+output:
+  tufte::tufte_html: default
+  tufte::tufte_handout: default
+  html_document:
+    df_print: paged
+bibliography: ref.bib
+link-citations: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# loading packages
+
+library(tidyverse)
+library(readxl)
+library(normtest)
+library(gridExtra)
+library(MASS)
+library(lmtest)
+library(regclass)
+library(ggfortify)
+library(sandwich)
+library(spdep)
+library(rgdal)
+library(maptools)
+library(sp)
+library(RColorBrewer)
+library(e1071)
+library(spatstat)
+library(GISTools)
+library(reshape2)
+library(ggthemes)
+library(kableExtra)
+library(sjPlot)
+library(stargazer)
+```
+
+```{r include=FALSE}
+# set up colors for plots
+col_b = "#1d3557"
+col_r = "#d62828"
+col_g = "#2a9d8f"
+col_i = "#264653"
+
+# setting up customized ggplot theme for consistency 
+my_theme <- function(){
+  theme_tufte() +
+    theme(axis.title=element_text(size=rel(0.75)),
+          plot.title=element_text(size=rel(0.75), hjust=0.5),
+          axis.text = element_text(size=rel(0.75)))
+}
+
+# disable scientific notation
+options(scipen=999)
+
+# a function that generates the basic stats
+getSummary <- function(x) {
+  summaryMatrix <- rbind(sapply(x, summary),
+                   sapply(x, sd),
+                   sapply(x, kurtosis),
+                   sapply(x, var),
+                   sapply(x, length))
+  rownames(summaryMatrix)[7:10] <- c('Std.Dev.', 'Kurtosis', 'Var', 'Obs.')
+  
+  return(round(summaryMatrix, 2))
+}
+
+# load the main dataset 
+data <- read_excel("../data/powiaty2011EXPtranslated.xlsx")
+data$pname <- gsub("Powiat ", "", data$poviatName)
+
+# manually correct a typo in the dataset
+data$poviatCode[344] <- "0265000"
+```
+
+# Abstract
+
+In view of the record low fertility rate in Poland in recent years, the Polish government introduced the program "Family 500+" (“Rodzina 500+”) which aims to boost the birth rate by providing tax-benefit aids. The program has cost the government over 31.2 billion PLN one year after its launch^[Ministry of Family and Social Policy, Poland. https://www.gov.pl/web/family/family-500-programme]. This paper deals with the problem of fertility in Poland, specifically what drives the birth rate. Based on Becker's fertility theory, both linear and spatial econometric models were constructed to test the impact of socio-economic factors on the fertility rate at the county (poviat) level. The results may be a clue for building alternative pro-family policies which are not based on subsidies and are much cost-effective than programs such as 500+.
+
+# Introduction
+
+The problem of record low fertility in Poland has been a recurrent theme in public debate in recent years. Especially in the periods preceding elections, one hears about the need to support families and promote fertility. Politicians develop new initiatives that could convince Poles to have more children. This is not only due to the desire to "ensure the continuity of the nation", but above all due to economic needs. For instance, a sufficiently high birth rate is required to relieve the pension system, which in Poland is pay-as-you-go^[Pay-as-you-go pension system - current pensions are paid out of contributions made today. This system works well when the number of retirees is lower than the number of working people. With increasing life expectancy and a high demographic burden (the ratio of people in the post -working age to people in the working age), a sufficiently high birth rate is needed to ensure the continuity of the system.].
+
+During the postwar years and the communist period, fertility in Poland was high [@komorowska1975]. However, after the system  transformation, the fertility rate started to decline drastically [@podogrodzka2013]. Since 2002, the number of live births per 1,000 population has fluctuated from year to year, but remained in the range of 9-11‰.
+
+```{r include=FALSE}
+# load csv data that contains birth rate in Poland from 2002 (column ) to 2019
+birthRate1000 <- read.csv2("../data/birthrate.csv")
+
+# overview 
+tibble::glimpse(birthRate1000)
+
+# select columns that contains data of our interest 
+birthRate1000 <- birthRate1000 %>% 
+  dplyr::select(starts_with("urodzenia")) %>% 
+  t() %>% 
+  as.data.frame()
+
+birthRate1000$year <- str_extract(rownames(birthRate1000), "2\\d{3}")
+
+# remove rownames and apply new col names 
+rownames(birthRate1000) <- NULL
+colnames(birthRate1000) <- c("BirthRate", "Year")
+```
+
+```{r echo=FALSE, message = FALSE, warning = FALSE, fig.height=2.2, fig.fullwidth=TRUE, fig.cap="Birth rate per 1,000 population in Poland. Source: Statistics Poland."}
+ggplot(birthRate1000, aes(x = Year, y = BirthRate, group = 1)) +  
+  geom_line() + 
+  my_theme() +
+  theme(
+    axis.title = element_text(size = rel(0.5)),
+    plot.title = element_text(size = rel(0.5), hjust = 0.5),
+    axis.text = element_text(size = rel(0.5))
+  )
+```
+
+It is the fertility fluctuation in the previous decade that we are particularly interested in. To analyze what socio-economic factors are likely to be linked with fertility, we firstly build a linear model on the basis of Becker's fertility theory [@becker1981], next, we will use spatial econometric models to account for the autocorrelation existed in the linear model. The data used is from the Polish National Census of 2011 and accompanied with additional data from Statistics Poland^[https://stat.gov.pl/en/] of the same year. The paper is organized as follows: in the next section, we briefly discuss the Becker fertility theory which is the basis of our empirical model, then we construct a linear model using selected variables. Last but not least, we supplement the linear model with spatial components, to address the spatial autocorrelation that underlies in the linear model.
+
+# Literature Review
+
+## Background
+
+The first scientific theories on fertility are associated with the works of Malthus, in which he linked fertility to natural resources[@malthus1888]. He observed that population grows much faster than food production, hence, due to the lack of availability of contraceptive methods, the only way to stop the world being over-populated seemed to be natural disasters (such as: epidemics, droughts, wars, etc.). 
+
+The past century was a watershed in many ways - and changes in fertility patterns are part of that. After 1945, almost every country in the world experienced intense population growth, e.g. the baby boom. The postwar generation was very large, and mortality rates were falling. The specter of overpopulation returned[@abernethy1994]. For this reason, in the 1960s there was a great deal of publication and research on dealing with excessive fertility. The development of the birth control pills and the popularization of effective birth control methods enabled couples to consciously plan the number of offspring they would have. Also, in Catholic circles, which tended to have a higher fertility rate, the term "responsible parenthood" became popular, which meant, in simple terms, the prudent planning of the number of offspring[@paweł1968]. Since then, fertility has ceased to be so strongly linked to natural fertility, or rather, it became the result of each couple's rational choice. This transformation was of interest to Gary S. Becker. His work analyzed decisions about the number of children in households.
+
+## Becker's Child Demand Theory
+
+Using the typical assumptions of neoclassical economics, Becker proposed a model that could explain fertility in a given family, which provided the factors that shape the decision to have or refrain from having offspring: income, child costs, knowledge, uncertainty, and tastes [@becker1981]. "Child costs" are related to the resources devoted to the maintenance as well as the opportunity cost, for example, lost income or career in favor of raising a child. In addition, Becker noted that the costs associated with having children are incomparably higher for women than for men. "Tastes" are related to the "benefits" or "utility from the child", which is not the same for every individual. Becker believed that a child is a good that increases in quality as the money invested in it (e.g., spending on education) increases. Utility from a child of higher quality is higher than from other, less invested children. The main relationships derived from Becker's theory are as follows: demand for children increases as family income and men's wages increase as the family can afford more children of higher quality; demand decreases as women's wages increase and their education, since raising offspring results in the loss of such income for women – which raises the opportunity cost. An additional factor that influences fertility decisions is the parents' level of altruism. This can be interpreted as the couple's natural desire to have, for example, five children or only one. Parents make decisions about the number of children they have in such a way as to maximize their utility, however, such decisions are subject to constraints of the available resources that the family can provide. Therefore, fertility is also connected with the family patterns observed in the environment [@becker1981].
+
+## Research Hypotheses
+
+Firstly, we want to test the hypothesis that fertility is dependent on economic variables such as earnings and unemployment. We would like to estimate to what extent parents make their decision to have children, how much they rely on their economic situation, i.e. the profit and loss suggested by Becker. 
+
+Next, we want to test the hypothesis that fertility is dependent on women's economic situation, whehter her educational level and mode of earning will affect her procreation decisions. According to Becker, the opportunity cost of having children is mainly borne by mother, hence, this will help us determine how much the oppotunity cost affects fertility.
+
+Lastly, we want to verify the veracity of the positive effect of regional family patterns on parents' decision to have offspring. This is a completely non-economic factor that, when proposed in a microeconomic model right next to costs and benefits, may raise objections and some distrust. We term this factor as _altruism_ in the remainder of this paper.
+
+# Empirical Model
+
+The main goal is to obtain an easy-to-interpret model that could serve as a guideline for building policies that encourage fertility decisions. These proposals would be different from popular social programs based on subsidies. Based on Becker’s fertility theory, a linear model to describe fertility in Poland is proposed:
+
+
+$$
+\text{births1000}  =  \beta_0 + \beta_1\text{marriages} + \beta_2\text{degree} +  \beta_3\text{dependent} + \beta_4\text{altruism} + \beta_5\text{unemployMen} + \beta_6\text{salary} + \beta_7\text{women2049} + \varepsilon_i
+$$
+Where:
+
+- _marriages_ - number of marriages in a given poviat; it is an indicator that gives a good approximation of the number of households in Poland (the theoretical model is based on the decisions of such units).^[The 2011 Census showed that only 4.2 percent of all people living in informal relationships (non -marital) are in relationships forming households[@szukalski2013].]
+- _degree_ - number of women with higher education degree in a given poviat. Due to the lack of influence of the variables of secondary and occupational education of the mother, this is the only variable that can reflect the theoretical relationship - fertility decreases as women's education increases.
+- _dependent_ - number of women being financially reliant on another family member in a given poviat; it is a variable that approximates the number of women who suffer low opportunity cost of having a child; being dependent on another family member, they do not give up their careers to raise their offspring.
+- _altruism_ - average number of people in a one household in 2011 in a given poviat; it is the measure that allows local trends in family size to be taken into account. It is also the variable that best approximates the measure of the "altruism" of parents, that is, their natural inclination to create a family of a size similar to the family of their parents, neighbors and loved ones.
+- _unemployMen_ - value of registered unemployment rate for men in a given poviat. This indicator is designed to capture the impact of father's lack of stable income on the number of offspring (variable analyzed due to lack of data on male income, but based on the same theoretical relationship - father's income and fertility)
+- _salary_ - mean level of monthly income in a given poviat. Although the gender-specific data is not available, this measure should give a good indication of the relationship between fertility and family income.
+- _women2049_ - number of women in a production age in a given poviat - 20-49 years old in a given poviat.^[20-49 years old is the age range in which most births in Poland occur] This is a control variable to determine the procreation potential of a county.
+
+
+# Explanatory Data Analysis
+
+The dependent variable _births1000_ is the number of births as per 1,000 inhabitants of the region. From the histogram on the right we can see that it resembles a normal distribution with a slight positive skewness (_kurtosis_ = 0.33). Its values range from 7.25 to 14.60 with variance being 1.32. 
+
+```{r echo=FALSE}
+getSummary(data[ , "births1000"]) %>% kable(caption = "Descriptive statistics of dependent variable.") %>% kable_styling(full_width = F)
+```
+
+```{r echo=FALSE, fig.margin=TRUE, fig.cap="Distribution of births1000 variable."}
+ggplot(data) +
+  geom_histogram(aes(x = births1000, y = ..density..),
+                 binwidth = 1)+
+  geom_density(aes(x = births1000, y = ..density..))+
+  my_theme() +
+  theme(
+    axis.title = element_text(size = rel(2)),
+    plot.title = element_text(size = rel(2), hjust = 0.5),
+    axis.text = element_text(size = rel(2))
+  )
+```
+
+The descriptive statistics of the independent variables are summarized in the table below:
+
+```{r, echo=FALSE}
+# display the original variables only
+nonTransformedVariables <- c('births1000', 'marriages', 'degree',
+                             'women2049', 'altruism', 'salary',
+                             'dependent', 'unemployMen')
+
+# get the summary of the independent variables 
+getSummary(data[ , nonTransformedVariables[-1]]) %>% kable(caption = "Descriptive statistics of independent variable.") %>% kable_styling()
+```
+
+It can be seen that the variables _marriage_, _altruism_, and _unemployMen_ have similar order of magnitude and similar means to the dependent variable _births1000_, their median values are very close to their mean values, indicating possible symmetrical distributions which can potentially be of normal distribution, whereas variables _degree_, _women2049_, _salary_ and _dependent_ have larger standard deviations and kurtosis, which hints potential outliers and asymmetrical distributions.
+
+Our observations are confirmed by the histograms. The shape of _marriage_, _altruism_, and _unemployMen_ resemble normal distribution and _degree_, whilst _women2049_, _salary_ and _dependent_ are heavily right skewed. 
+
+```{r echo=FALSE, fig.height=3, fig.fullwidth=TRUE, message=FALSE, warning=FALSE}
+
+# Histograms for non-transformed variables
+for (i in 1:length(nonTransformedVariables)){
+  name<- paste0('plot', i)
+  
+  namCol <- nonTransformedVariables[i]
+  
+  p <- ggplot(data) +
+    geom_histogram(aes(x = !!ensym(namCol)))+
+  labs(x = namCol)+
+    my_theme() + 
+    theme(axis.text = element_text(size=rel(0.5)))
+  
+  assign(name, p)
+
+}
+
+# plot them all 
+grid.arrange(plot1, plot2, plot3, plot4, plot5, plot6, plot7, plot8,
+             nrow = 2, ncol = 4) 
+```
+
+We plot a heatmap showing the results of pearson correlation between the variables. All variables are correlated with the dependent variable _births1000_. _salary_ has the weakest correlation with _births1000_, which may suggest an insignificant relationship. A positive correlation with the explanatory variable is seen with the variables _degree_, _women2049_, _marriages_, _altruism_, and _dependent._ Negative correlation can be found for the variables _salary_ and _unemployMen._ Already at this point, it can be seen that the direction of these correlations for the variables degree and salary is not entirely consistent with theory. The strong correlation between the independent variables _women2049_ and _dependent_, _degree_ and _dependent_, _degree_ and _women2049_ may cause colinearity problems. Therefore, it is necessary to perform variable transformation to eliminate such colinearity. 
+
+```{r echo=FALSE}
+# Correlation for the non-transformed variables
+
+# create a subset for the interesting variables
+dataNonTrans <- data[,nonTransformedVariables]
+
+dataCorr <- melt(cor(dataNonTrans))
+  
+# plot the heat map 
+ggplot(dataCorr, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = col_g,
+    high = col_r,
+    mid = "white",
+    midpoint = 0
+  ) +
+  my_theme() +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    vjust = 1,
+    size = 12,
+    hjust = 1),
+    axis.text.y = element_text(size = 12)
+  ) +
+  coord_fixed() +
+  geom_text(aes(Var2, Var1, label = (round(value, digits = 2))), color = "black", size = 3.5) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank()
+  )
+```
+
+A reasonable approach is to divide them with the total number of women in the poviat, thus removing the indirect effect of the number of women on the other variables, meanwhile, it will also make the variables more robust to the size of the population in the given poviat. After the transformation, we can still observe a strong relationship between _dependent100_ and _altruism_ (pearson correlation: 0.74), but all the other colinearities have been resolved. 
+
+```{r echo=FALSE}
+# Correlation for the transformed variables
+# 
+transformedVariables <- c('births1000', 'marriages', 'degree1000',
+                          'women2049', 'altruism', 'salary',
+                          'dependent100', 'unemployMen')
+
+# create a subset for the interesting variables
+dataTrans <- data[, transformedVariables]
+
+dataTransCorr <- melt(cor(dataTrans))
+  
+# plot the heat map 
+ggplot(dataTransCorr, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = col_g,
+    high = col_r,
+    mid = "white",
+    midpoint = 0
+  ) +
+  my_theme() +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    vjust = 1,
+    size = 12,
+    hjust = 1),
+    axis.text.y = element_text(size = 12)
+  ) +
+  coord_fixed() +
+  geom_text(aes(Var2, Var1, label = (round(value, digits = 2))), color = "black", size = 3.5) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank()
+  )
+```
+
+# Linear Model
+
+Having done the exploratory data analysis and data transformation, we are ready to estimate our linear model based on Becker's theory:
+
+```{r}
+# linear model
+OLS <- lm(births1000 ~ marriages + degree1000 + dependent100 + altruism + 
+          unemployMen + salary + women2049, data = data)
+
+tab_model(OLS, digits = 8)
+```
+
+At the first glance, the OLS model is quite successful: the model is able to explain 50.1% of its variances ($R^2 = 50.1\%$), all independent variables are jointly significant (F-statistic = 53.38, P-value < 0.05), all independent variables are significant on 10% level as well. The resulting parameter estimates can be interpreted (ceteris paribus): if there is one additional marriage per 1,000 county residents, the birth rate will increase by 0.2796 units (0.2796 live births, per 1,000 county residents). If one more woman graduates from college for every 1,000 people living in the county, the birth rate will increase by 0.0079 units. If the share of women who are dependent on another family member (not working) increases by one percentage point, the birth rate will increase by 0.1736 units. If the average household size in a county increases by one, the birth rate will increase by as much as 0.3809 units. If an additional woman in a production age in a given poviat, the birth rate will increase by 0.00000362 unit. Variables _unemployMen_ and _salary_ have negative impact on birth rate: if registered unemployment among male residents in a county increases by one percent, the birth rate will decrease by 0.0754 units. If the mean monthly income in a given poviat decreases by 1,000 zloty, the birth rate will decrease by 0.32159 units.
+
+## Model Diagnostics 
+
+The next step is to check for collinearity in the model. The results of the VIF statistic shows that there is no collinearity in the model (VIF < 10 for all variables).
+
+```{r}
+# check colinearity 
+VIF(OLS)
+```
+```{r echo=FALSE, fig.margin = TRUE, fig.cap="Residual vs. Leverage Plot", message=FALSE, warning=FALSE}
+autoplot(OLS, which = 5) + 
+  my_theme() 
+```
+```{r echo=FALSE, fig.margin = TRUE, fig.cap="Cook's dist vs. Leverage Plot", message=FALSE, warning=FALSE}
+autoplot(OLS, which = 6) + 
+  my_theme() 
+```
+
+The diagnostic plots have shown that all observations are well within the Cook’s distance lines, although three observations (23, 318, and 321) may cause potential problems, we choose to leave them unchanged, the reason being removing them may cause spatial discontinuity in the spatial models. 
+
+Next, we check if the estimated model satisfies the linear model assumptions. The first step is to check if the model is of correct functional form by using Ramsey RESET test. And the result shows that, at the 10% confidence level, we can't reject the null hypothesis that the linear form of the model is correct (P-value = 0.5842), therefore, the linear model specification is appropriate. 
+
+```{r}
+# Validity of linear model: Ramsey RESET test
+resettest(OLS, power = 2:3, type = "fitted")
+```
+Then, We test the assumption of homoskedasticity of the residuals. The Breusch-Pagan test reports P-value 0.1535, we can not reject the hypothesis the residuals are of homoskedasticity.
+
+```{r}
+# Homoskedasticity: Breush-Pagan Test
+bptest(OLS, studentize = T)
+```
+Both Jarque-Berra and Shapiro-Wilk test the normality of the residuals. In both cases, the P-value is higher than 5% (0.597 and 0.8316 respectively). Thus, there is no basis to reject the hypothesis of normality of the distribution of residuals in the model. 
+
+```{r}
+# Testing for normality of residuals
+# Jarque Bera Test
+jb.norm.test(OLS$residuals, nrepl = 1000)
+
+# Shapiro-Wilk normality test
+shapiro.test(OLS$residuals)
+```
+The last assumption remaining to be tested is the lack of autocorrelation of the random component. We will test this using two tests: Durbin-Watson and Breusch-Godfrey.
+
+```{r}
+# Testing for Autocorrelation 
+# Durbin-Watson test
+dwtest(OLS)
+```
+
+```{r}
+# Breusch-Godfrey test
+bgtest(OLS)
+```
+
+Both Durbin-Watson test and Breusch-Godfrey test suggest that the null hypothesis of no autocorrelation of the random component should be rejected, having the P-value of 0.002018 and 0.008329, respectively, which cause inconsistent estimation. This can be overcome by using robust estimators:
+
+```{r, warning=FALSE, message=FALSE}
+# Robust Standard Errors and Tests
+hac <- coeftest(OLS, vcov. = vcovHAC)
+nw <- coeftest(OLS, vcov. = NeweyWest)
+
+stargazer(OLS, hac, nw, type="text", digits = 8,
+          column.labels = c("OLS", "HAC", "NW"))
+```
+
+From the above results, we note that the robust estimations report the same values of the estimators with different variance. In the next section, we will use spatial econometric models to combat the autocorrelation existed in the linear model residuals. 
+
+
+# Spatial Models 
+
+Although the linear model suffers from autocorrelation, it is not clear whether such autocorrelation is caused by omitted variables or spatial autocorrelation. If it is the latter case, estimation of linear models may lead to model specification error (when significant spatial lag of dependent variable or independent variable is omitted), inconsistent and overbias (when significant spatial lag of dependent variable is omitted), and inefficient estimation (when significant spatial lag of the error term is omitted). In the second part of the study, we will use spatial econometric models to test Becker's fertility theorem. 
+
+The most general spatial dependence model, also known as the Manski model (GNS), which features all three spatial lag components, takes the following form: 
+
+$$
+\begin{aligned}
+Y &= \beta_0 + \rho WY + X \beta + WX \theta + u\\
+u &= \lambda W u + \varepsilon
+\end{aligned}
+$$
+where $\rho WY$ is the spatial lag of the dependent variable, $WX \theta$ is the spatial lag of the explanatory variable, $\lambda W u$ is the spatial lag of the error $u$, and $W$ stands for spatial weighting matrix, which allows to incorporate spatial effects into the model model. In this study, $W$ is a square binary matrix which stores dummies saying whether two regions are neighbors. Such form allows to provide weighted spatial average of values in the neighborhood and take them into account when calculating predictions for a given individual. The Manski model can be reduced to Kelejian-Prucha model (SAC), Spatial Durbin model (SDM), Spatial Durbin Error model (SDEM) which has two spatial components, and Spatial Lag model (SLM), SLM, and Spatial Error model (SEM). Since there are no formal strategy to choose the fittest model, we will use a top-down approach and start from the GNS.
+
+```{r warning=FALSE, message=FALSE, results=FALSE}
+# loading spatial elements 
+pov <- readOGR("../data/", "powiaty")
+pov <- spTransform(pov, CRS("+proj=longlat +datum=NAD83"))
+voi <- readOGR("../data/", "wojewodztwa")
+voi <- spTransform(voi, CRS("+proj=longlat +datum-NAD83"))
+
+# preparing spatial weight matrix
+cont.nb <- poly2nb(pov, queen = T) # converting from sp to nb object
+cont.listw <- nb2listw(cont.nb, style = "W")
+```
+
+First, we verify the existence of the spatial autocorrelation in the linear model using Global Moran's I test, both results reject the null hypothesis hence there is spatial autocorrelation in the residual. 
+
+```{r}
+# Global Moran I
+lm.morantest(OLS, cont.listw)
+```
+```{r}
+# Moran I
+moran.test(OLS$residuals, cont.listw)
+```
+
+Using the joint-count test we can learn the statics - including the mean, variance, and expected value of the autocorrelation. According to the result, the null hypothesis about spatial randomness is rejected in both groups, in other words, there are positive spatial autocorrelation in both positive and negative residuals: 
+
+```{r}
+# Join count test for residuals 
+resid <- factor(cut(OLS$residuals, breaks = c(-100, 0, 100), 
+                    labels = c("negative", "positive")))
+joincount.test(resid, cont.listw)
+```
+## Visualization
+
+Before we proceed to the spatial statistics, we use the following map to visualize the distribution of the dependent variable _births1000_ across Poland. Already we can observe some patterns: poviats in the north and south regions generally have higher birth rates; poviats that are close to the eastern and western borders tend to have lower birth rates than those in the middle (e.g. Mazowieckie and Wielkopolskie); the lowest births rates are likely to happen in Opolskie and Podlaskie. What's more, poviats at the border of two voivodeships seem to share the characteristics with its neighbour from a different voivodeship rather than a distant poviat in the same voivodeship. 
+
+```{r warning=FALSE, message=FALSE, results=FALSE}
+pov.sf <- st_read("../data/powiaty.shp")
+pov.sf <- st_transform(pov.sf, crs = "+proj=longlat +datum=NAD83")
+voi.sf <- st_read("../data/wojewodztwa.shp")
+voi.sf <- st_transform(voi.sf, CRS("+proj=longlat +datum-NAD83"))
+
+# function that subtract first 4 characters of a string
+foo <- function(x) substr(x, 1, 4) 
+data$jpt_kj_i01 <- apply(data[,"poviatCode"], MARGIN = 2, foo)
+
+# merge dataset with sf object
+pov.sf.merged <- pov.sf %>% 
+  full_join(data, by = "jpt_kj_i01")
+
+ggplot() +
+  geom_sf(pov.sf.merged, mapping = aes(geometry = geometry, fill = births1000), color = NA, size = 0.1) +
+  scale_fill_gradient(low = "#4cc9f0",  high = "#f72585") +
+  geom_sf(voi.sf, mapping = aes(geometry = geometry), fill = NA, color = "black", size = 0.15) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Poland's Birth rate per 1,000"
+  ) +
+  my_theme()
+```
+
+The Moran's scatter plot gives us an overview of the relationships of all the poviats and their neighbours in connection with the global Moran statistics. The _x-axis_ is expressed in terms of the standard deviations of the dependent variable _births1000), and the _y-axis_ is the spatailly lagged _births1000_. The slope of the regression line corresponds to the Moran's I. Poviats that are above the regression line, e.g. Gdynia, have higher birth rates than their neighbours. On the contrary, poviats that are below the regression line, e.g. Jelenia Gora, are worse off (have lowe birth rate) than their neighbours.
+
+```{r warning=FALSE}
+# Moran's scatter plot
+moran.plot(as.vector(scale(data$births1000)), cont.listw, pch = 19,
+          labels = as.character(data$pname), xlim = c(-3.5, 4), ylim = c(-2, 3),
+          xlab = "standardized births1000", ylab = "Spatially Lagged births1000")
+
+```
+
+From the Moran's scatter plot we observe strong positive spatial autocorrelation. Poviats are located mainly in the first (in the upper-right corner) and third quadrant (the lower-left corner), where _x_ and _y_ have the same signs. In the first quadrant, where both _x_ and _y_ are positive, both the birth rate in the given poviat and the average birth rate in the nerghbouring poviats are higher than the overall average. Likewise, poviats in the third quadrant have lower birth rate in both the poviat itself and its neighbours. 
+
+To have a clear picture of the geographical patterns of the poviats, we use the results obtained from the Moran scatter plot, assign the quadrant to each poviat, and plot the following map:
+
+```{r warning=FALSE}
+# Mapping quadrant to each poviat 
+pov.sf.merged <- pov.sf.merged %>% 
+  mutate(births1000_scale = scale(births1000),
+         births1000_lag = lag.listw(cont.listw, births1000_scale),
+         quadrat = ifelse(births1000_scale >= 0 & births1000_lag >= 0, "1",
+                   ifelse(births1000_scale >= 0 & births1000_lag < 0, "2",
+                   ifelse(births1000_scale < 0 & births1000_lag < 0, "3", "4")))) %>% 
+  dplyr::select(-c(births1000_scale, births1000_lag)) 
+
+# Plot the map
+ggplot() +
+  geom_sf(pov.sf.merged, mapping = aes(geometry = geometry, fill = quadrat), color = NA, size = 0.1) +
+  scale_fill_manual(values = c("#f72585", "#7209b7", "#4361ee", "#4cc9f0")) +
+  geom_sf(voi.sf, mapping = aes(geometry = geometry), fill = NA, color = "black", size = 0.15) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Moran scatterplot Birth Rate in 2011"
+  ) +
+  my_theme()
+```
+
+From the above graph, it is clear to see a spatial pattern: almost all poviats in the Pomorskie, Wielkopolskie and Slaskie are located in the first quadrant; most poviats in Mazowieckie, Kujawsko-Pomorskie, Lubuskie and Malopolskie are in the first quadrant. Poviats in Zachodnio-Pomorskie, Opolskie, Lodzkie, Swietokrzyskie, Podlaskie, are mostly in the third quadrant. 
+
+Next, we use the local Moran's I statistics to assess the local indicators and try to identify the hot spots. After removing duplicated poviat names, we apply `localmoran()` to obtain the local Moran's I for each poviat.
+
+```{r warning=FALSE}
+# Removing duplicated poviat names
+dup_names <- c("tomaszowski", "krośnieński", "brzeski", "ostrowski", 
+               "opolski", "grodziski", "nowodworski", "bielski", "średzki",
+               "świdnicki")
+
+for (i in 1:length(dup_names)){ 
+  a <- which(data$pname == dup_names[i])[2] 
+  data$pname[a] 
+  data$pname[a] <- paste0(as.character(data$pname[a]), "`")}
+
+data$pname <- as.factor(data$pname)
+
+locM <- localmoran(data$births1000, cont.listw)
+oid1 <- order(data$mapID)
+row.names(locM) <- data$pname
+colnames(locM)[5] <- "p_value"
+```
+
+Both P-value < 0.05 and P-value > 0.95 suggest significant local Moran statistics. Poviat Gdynia has a local Moran's I less than 0 and P-value exceeds the upper threshold ($I_i = -1.264458$ and P-value = 0.9977816), suggesting its a local low birth rate center. 
+
+```{r}
+# local low birth rate center
+locM %>% as.data.frame() %>% 
+  filter(p_value > 0.95) %>% 
+  kable(digits = 4)
+```
+
+98 poviats, including niżański, stalowowolski, etc. have positive local Moran's I and P-value less than the lower threshold 0.05, meaning that these are the local hot spot - surrounded by relatively high birth rates. 
+
+```{r}
+# local hot spot
+locM %>% as.data.frame() %>% 
+  filter(p_value < 0.05) %>% 
+  head() %>% kable(digits = 4)
+```
+
+
+
+```{r}
+# map of the significance of Moran's local statistics
+pov.sf.merged$loc_Moran <- locM[,5]
+pov.sf.merged <- pov.sf.merged %>% 
+  mutate(locM_Pval = ifelse(loc_Moran <= 0.05, "locM > 0", 
+                     ifelse(loc_Moran <= 0.95, "insignificant", "locM < 0"))) 
+
+
+ggplot() +
+  geom_sf(pov.sf.merged, mapping = aes(geometry = geometry, fill = locM_Pval), color = NA, size = 0.1) +
+  scale_fill_manual(values = c("#4361ee", "#4cc9f0", "#f72585")) +
+  geom_sf(voi.sf, mapping = aes(geometry = geometry), fill = NA, alpha = 0.8, color = "black", size = 0.15) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Local Moran statistics"
+  ) +
+  my_theme()
+```
+
+## Spatial Models
+
+### GNS model
+
+We start our modeling with the GNS model estimation:
+
+```{r warning=FALSE}
+
+form <- formula(births1000 ~ marriages + degree1000 + dependent100 + altruism + 
+                  unemployMen + salary + women2049)
+
+GNS <- sacsarlm(form, data = data, listw = cont.listw, type = "sacmixed", method = "LU")
+
+summary(GNS, Nagelkerke = TRUE)
+```
+
+When all three spatial lags are taken into consideration, both the significance and the values of the estimators changed as compared with the OLS model. The most notable difference comes from estimators of _altruism_, of which the P-value decreases from 0.08472 to 0.0003083, and _women2049_, whose P-value increased from 0.01022 to 0.1302178, making _women2049_ insignificant in the spatial model. The spatial lags of explanatory variables _degree1000_, _dependent100_ and _unemployMen_ are significant at 1% level. What's more, both $\rho$ and $\lambda$ are significant in the GNS model too: having P-values close to 0. The opposite signs of $\rho$ and $\lambda$ may suggest that their effects are canceling out each other. The GNS model has a Nagelkerke pseudo $R^2$ value of 71.4% suggesting it's a fairly good model. The AIC and Log Likelihood results have supported that spatial model is more appropriate than the OLS model (GNS: 743.71, OLS: 937.32). 
+
+Removing the insignificant variable _women2049_ results in a higher AIC value, hence the restricted model GNS.1 is discarded. Subsequently, we will consider the spatial model with two spatial lags components. 
+
+```{r warning=FALSE}
+# GNS without `women2049`
+GNS.1 <- sacsarlm(births1000 ~ marriages + degree1000 + dependent100 + altruism + 
+                    unemployMen + salary, 
+                  data = data, listw = cont.listw, type = "sacmixed", method = "LU")
+
+summary(GNS.1, Nagelkerke = TRUE)
+```
+
+
+### Spatial Model with two spatial factors 
+
+In this section, spatial models with two spatial components are estimated: SAC model without spatial lag of the explanatory variables ($\theta = 0$), SDM without spatial lag of the error term ($\lambda = 0$), and SDEM without spatial lag of the dependent variable ($\rho = 0$).
+
+The SAC model with all explanatory variables turns out to be inappropriate: P-value of the spatial lag of the dependent variable $\rho$ is above the 10% threshold (P-value = 0.58144), moreover, _unemployMen_ becomes insignificant. 
+
+```{r warning=FALSE}
+SAC <- sacsarlm(form, data = data, listw = cont.listw, 
+                tol.solve = 1.0e-20, method = "LU")
+
+summary(SAC, Nagelkerke = TRUE)
+```
+
+After removing _unemployMen_ and re-estimate the SAC model, we obtain a better fitted SAC model (having lower AIC: 761.85). However, $\rho$ is still insignificant (P-value: 0.40781). 
+
+```{r warning=FALSE}
+form.unemp <- formula(births1000 ~ marriages + degree1000 + dependent100 + altruism + 
+                  salary + women2049)
+SAC.1 <- sacsarlm(form.unemp, data = data, listw = cont.listw, 
+                  tol.solve = 1.0e-20, method = "LU")
+
+summary(SAC.1, Nagelkerke = TRUE)
+```
+
+Likewise, two Spatial Durbin Models are estimated. The first one includes all explanatory variables and the second one with _unemployMen_ removed due to insignificance (P-value = 0.4777556). In model _SDM.1_, all explanatory variables are significant, however, the AIC value is higher than the full model _SDM_, the Nagelkerke pseudo $R^2$ decreases from 0.70172 to 0.69247. $\rho$ is significant in both models. 
+
+```{r warning=FALSE}
+SDM <- lagsarlm(form, data = data, listw = cont.listw, 
+                type = "mixed", tol.solve = 1.0e-20, method = "LU")
+
+summary(SDM, Nagelkerke = TRUE)
+```
+```{r warning=FALSE}
+SDM.1 <- lagsarlm(form.unemp, data = data, listw = cont.listw, type = "mixed", 
+                  tol.solve = 1.0e-20, method = "LU")
+
+summary(SDM.1, Nagelkerke = TRUE)
+```
+Similar observation is found in the Spatial Durbin Error model, the full model has better AIC score and Nagelkerke $R^2$ value despite _unemployMen_ being insignificant (P-value = 0.1057433). $\lambda$ is significant (P-value close to 0) in both models.  
+
+```{r warning=FALSE}
+SDEM <- errorsarlm(form, data = data, listw = cont.listw, etype = "emixed", 
+                   tol.solve = 1.0e-20, method = "LU")
+
+summary(SDEM, Nagelkerke = TRUE)
+
+```
+```{r warning=FALSE}
+SDEM.1 <- errorsarlm(form.unemp, data = data, listw = cont.listw, etype = "emixed", 
+                   tol.solve = 1.0e-20, method = "LU")
+
+summary(SDEM.1, Nagelkerke = TRUE)
+
+```
+
+
+### Spatial Model with one spatial factor
+
+Next, we proceed to spatial models with one spatial lag component: the Spatial Lag Model (SAR) with spatial lag of the dependent variable only, the SLX model with spatial lag of the explanatory variables only, and the Spatial error model with the spatial lag of the error term only. 
+
+In the first SAR model with all explanatory variables included, one may see that all variables are significant on the 10% level, with _altruism_ and _salary_ exceeding the 5% threshold (P-values being 0.06159 and 0.06397, respectively). Such result differs from the previous models where _unemployMen_ is insignificant in most cases. $\rho$ is significant (P-value is almost 0). However, the AIC score shoots up to 809.67, indicating it's a less fitted model than the previous ones. 
+
+
+```{r warning=FALSE}
+SAR <- lagsarlm(form, data = data, listw = cont.listw) 
+
+summary(SAR, Nagelkerke = TRUE)
+```
+Again, we have similar observations in the SLX models: _unemployMen_ being insignificant yet removing it causes rise in AIC score (AIC for SLX: 924.5764, AIC for SLX.1). In the unrestricted model SLX, the spatial lags of _degree1000_ and _salary_ are insignificant (P-values being 0.824918 and 0.181370, respectively), while only the spatial lags of _dependent100_ and _women2049_ are significant (P-values being 0.078773 and 0.035312, respectively) in the restricted model SLX.1. 
+
+```{r warning=FALSE}
+SLX <- lmSLX(form, data = data, listw = cont.listw) 
+
+summary(SLX)
+```
+```{r warning=FALSE}
+SLX.1 <- lmSLX(form.unemp, data = data, listw = cont.listw) 
+
+summary(SLX.1)
+```
+
+The last spatial model, SEM assumes both spatial lags of dependent $\rho$ and independent variables $\theta$ are negligible, meanwhile, the spatial lag of the error term $\lambda$ is proven to be significant in both of our models SEM and SEM.1. Removing the insignificant variable _unemployMen_ slightly improves the AIC score.
+
+```{r warning=FALSE}
+SEM <- errorsarlm(form, data = data, listw = cont.listw) 
+
+summary(SEM, Nagelkerke = TRUE)
+```
+```{r warning=FALSE}
+# SEM model
+# spatial autocorrelation of error (\lambda)
+SEM.1 <- errorsarlm(form.unemp, data = data, listw = cont.listw) 
+
+summary(SEM.1, Nagelkerke = TRUE)
+```
+
+## Quality Assessment of Spatial Models
+
+In the previous section, we briefly discussed the model quality assessment based on the Information Criteria AIC score, in this section, we utilize parametric approaches such as Likelihood Ratio test, Wald test in search for the fittest model and perform necessary diagnostics of the final model. 
+
+The following table summarizes both the AIC and the BIC scores:
+
+```{r echo=FALSE, warning=FALSE}
+aics <- c(AIC(GNS),
+          AIC(GNS.1),
+          AIC(SAC),
+          AIC(SAC.1),
+          AIC(SDM),
+          AIC(SDM.1),
+          AIC(SDEM),
+          AIC(SDEM.1),
+          AIC(SAR),
+          AIC(SLX),
+          AIC(SLX.1),
+          AIC(SEM),
+          AIC(SEM.1)
+          )
+
+bics <- c(BIC(GNS),
+          BIC(GNS.1),
+          BIC(SAC),
+          BIC(SAC.1),
+          BIC(SDM),
+          BIC(SDM.1),
+          BIC(SDEM),
+          BIC(SDEM.1),
+          BIC(SAR),
+          BIC(SLX),
+          BIC(SLX.1),
+          BIC(SEM),
+          BIC(SEM.1)
+          )
+
+result <- cbind(aics, bics)
+result <- round(result, digits = 2)
+colnames(result) <- c("AIC", "BIC")
+rownames(result) <- c("GNS",
+                      "GNS.1",
+                      "SAC",
+                      "SAC.1",
+                      "SDM",
+                      "SDM.1",
+                      "SDEM",
+                      "SDEM.1",
+                      "SAR",
+                      "SLX",
+                      "SLX.1",
+                      "SEM",
+                      "SEM.1")
+
+result %>% kable()
+```
+The GNS models have the lowest AIC scores (GNS: 743.71, GNS.1: 743.97), followed by the Durbin models SDEM and SDM, whilst SEM models have the lowest BIC scores (SEM.1: 796, SEM: 800.11). We perform the likelihood ratio test to compare the GNS and SEM models:
+
+```{r warning=FALSE}
+LR.sarlm(GNS, SEM) 
+```
+
+Based on result of the Likelihood ratio test, the difference between the full model GNS and the SEM model is significant (P-value is almost 0), therefore, we should opt for the GNS model. The same conclusion can be drawn from the following LR test, and the GNS model is the most appropriate for our topic. 
+
+```{r warning=FALSE}
+LR.sarlm(GNS, SDEM) 
+```
+
+Having selected the final model, we test its spatial dependence using the Wald test, and it shows that the distance between GNS and OLS is significantly large, thereby confirms the AIC result.
+
+```{r warning=FALSE}
+Wald1.sarlm(GNS) 
+```
+
+We use the Breusch-Pagan test to verify the heteroscedasticity of the residuals. Based on the P-value (0.05645), we should reject the null hypothesis that the variance of residuals are constant based on the 10% significance level, meaning there exists spatial heterogeneity, which may result from omission of significant variable or spatial autocorrelation. 
+
+```{r warning=FALSE}
+bptest.sarlm(GNS) 
+```
+
+We subsequently test the spatial autocorrelation in the residuals using Global Moran's I. On the basis of the Moran's I statistics, we reject the null hypothesis and there exist spatial autocorrelation in the linear model OLS ($I_{\text{moran}} = 14.576$, P-value is nearly 0), however, it was filtered out in the spatial model GNS ($I_{\text{moran}} = -0.011551$, P-value is nearly 0.5046).
+
+```{r warning=FALSE}
+lm.morantest(OLS, cont.listw)
+moran.test(GNS$residuals, cont.listw) # no autocorrelation 
+```
+If we further break down the residuals into negative and positive residuals and test the spatial relationship using join-count test, it's clear to see that positive residuals are randomly distributed in space, whereas negative residuals exhibit positive spatial autocorrelation. 
+
+```{r warning=FALSE}
+# join.count test for residuals (positive vs. negative)
+resid <- factor(cut(GNS$residuals, breaks = c(-100, 0, 100), 
+                    labels = c("negative", "positive")))
+joincount.test(resid, cont.listw)
+```
+
+
+Since the spatial spillover effect of the dependent variable is statistically significant, we interpret the model estimators using the direct and indirect effects instead of $\beta$:
+
+```{r warning=FALSE}
+W.c <- as(as_dgRMatrix_listw(cont.listw), "CsparseMatrix")
+trMat <- trW(W.c, type = "mult")
+
+GNS.imp <- impacts(GNS, tr = trMat, R = 2000)
+summary(GNS.imp, zstats = TRUE, short = TRUE)
+```
+
+The ratio of direct effect to indirect effect can be found as follows:
+
+```{r warning=FALSE}
+# ratio of direct effect to total effect 
+GNS.imp$res$direct / GNS.imp$res$total
+```
+For estimators which have opposite signs, the raito of direct effect to indirect effect is analyzed:
+
+```{r warning=FALSE}
+# strength of direct effect to indirect effect 
+abs(GNS.imp$res$direct) / abs(GNS.imp$res$indirect)
+```
+
+At a glance, the overall result shows that the total impact of all estimators are statistically significant at 10% significance level except _women2049_, the direct effect of _unemployMen_ is above the 10% significance threshold, and most of the spillover effect are statistically insignificant at the 10% significance level: _marriages_, _dependent100_, _altruism_, _salary_ and _women2049_. The individual interpretations are as follows:
+
+- for variables _degree1000_ and _dependent100_, both direct and indirect effects are positive, indicating that there exists a mutual supporting relationship. Meaning that when a region has more women with higher education or being financially reliant on their spouses, it may boost the birth rate within the region as well as its neighbor's. The direct effects account for 57.2% and 76.13% of the total effect for _degree1000_ and _dependent100_ respectively, yet the indirect effect of _dependent100_ is statistically insignificant (P-value = 0.102753).
+- on the contrary, for variables _unemployMen_ and _salary_, both direct and indirect effects are negative, indicating a mutual weakening relationship: when the unemployment rate for men is rising, or the income decreases in a given region, it's likely to negatively impact it's own birth rate and its neighbors'. In addition, only 27.64% of the total effect of _unemployMen_ is internalized (P-value = 0.10330187) and the rest is diffused to the neighboring poviats (P-value = 0.009356). The _salary_ estimator  has a significant direct effect only which takes up 60% of the total effect (P-value = 0.00514592), however, its spillover effect is statistically insignificant (P-value = 0.300359). 
+- for variables _marriages_, _altruism_ and _women2049_, which have positive direct effect and negative indirect effect, there indicates a depriving relationship. In other words, a region may suffer from its neighbors who have more marriages, higher number of average people in the household and more women in a production age. However, the indirect effect of all three variables are insignificant (P-value for _marriages_:  0.961049, P-value for _altruism_: 0.663548, P-value for _women2049_: 0.957836). Their ratio of direct effect to indirect effect are 62.96, 5.64 and 10.42, respectively. 
+
+
+
+# Conclusion 
+
+In this paper, we firstly estimated a linear model that explains the fertility in Poland on the basis of Becker's fertility theory. The linear model has a fairly good fit and explains over 50% of the variance, without taking into account the impact of pro-family subsidies and allowances on fertility decisions, and all the explanatory variables that we used are statistically significant on the 10% significance level. 
+
+The research hypothesis we verified related to Becker’s original 1981 theory were not rejected, but neither were they accepted in full: 1. fertility is negatively related to the mean income in the poviat and the unemployment rate of men; 2. fertility is positively related to women's economic situation: the more women that have either received higher education or are financially dependent in a poviat, the higher the birth rate. The former conclusion seems to be against intuition: women with higher education usually earn more, hence their opportunity cost of having a child is higher. 3. Fertility is strongly influenced by their worldview: procreation decisions will tend to be close to the commonly accepted family model. However, despite having the highest impact, the variable also has a large standard deviation due to the relative high P-vavlue (P-value = 0.085). Note that the model we estimated was based on microeconomic theory - focusing on individual procreation decisions within a single household, whether there exist endogeneity between the non-economical variable _altruism_ and the dependent variable _births1000_ is unclear. 
+
+Spatial econometric models were supplemented to the linear model due to the presence of the autocorrelation of the model residuals, which proved to improve the model quality by having much lower AIC scores. The Manski model which features all three spatial components is the most appropriate choice in this study. Unfortunately, there still exists autocorrelation in the model residuals, which may result from omitted variables. The result of the spatial models is generally inline with the one from linear models with some offsets, yet most of the spillover effects are statistically insignificant. 
+
+Of course, we cannot say that subsidies have no impact on fertility in Poland. However, the conclusions drawn from the model we estimated are different from the commonly held view on the effectiveness of pro-family policies. Perhaps there are more effective methods of increasing fertility that simultaneously stimulate the economy and are much cheaper than yet another expensive program of family subsidies.
+
+A way to improve fertility through the variable altruism could be simple advertising campaigns aimed at expanding the socially accepted family model. In order to influence fertility through the unemployMen variable it would be necessary to support male employment and create more jobs in the economy - this action would not only stimulate fertility, but would also directly improve the economic situation of the country.
+
+According to the estimated relationship - implementing propositions shown above would raise the fertility rate. These proposals are based on the fertility models obtained in this work. These are not perfect, but they still provide a good example of how microeconomic theories can be used to deal with problems on a national scale.
+
